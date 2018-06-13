@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <sys/select.h>
 #include <unistd.h>
 
 #include <stdio.h>
@@ -22,6 +23,7 @@ typedef struct tcb_s
 	int id;				/* the id of the thread */
 	status_e status;	/* the status: running/finished */
 	int returnValue;	/* the return value */
+	int fd;				/* file descriptor of current read */
 	ucontext_t context;	/* the ucontext structure */
 } tcb_t;
 
@@ -34,6 +36,39 @@ typedef struct threads_s
 } threads_t;
 
 static threads_t threads; 		/* the scheduler */
+
+static int hasInput(int fd)
+{
+	/* set of fds */
+	fd_set rfds;
+    struct timeval tv;
+
+    /* put in the requested fd */
+    FD_ZERO(&rfds);
+    FD_SET(fd, &rfds);
+
+    /* timout: 0.0 seconds */
+    tv.tv_sec = 0;
+    tv.tv_usec = 0;
+
+    /* check if data is available for reading */
+    int retval = select(fd + 1, &rfds, NULL, NULL, &tv);
+
+    if (retval == -1) 
+    {
+    	perror("select() failed");
+    }
+    else if (FD_ISSET(fd, &rfds)) 
+    {
+    	return 1;
+    }
+    else
+    {
+    	return 0;
+    }
+	
+	return 1;
+}
 
 void ult_init(ult_f f)
 {
@@ -64,7 +99,8 @@ int ult_spawn(ult_f f)
 	newThread->context.uc_stack.ss_size = STACK_SIZE;
 	newThread->context.uc_stack.ss_sp = malloc(STACK_SIZE);
 	newThread->id = threads.size;
-	
+	newThread->fd = -1;
+
 	/* check if the stack creation worked */
 	if (newThread->context.uc_stack.ss_sp == NULL)
 	{
@@ -96,9 +132,8 @@ int ult_spawn(ult_f f)
 	return (threads.size - 1);		
 }
 
-void ult_yield()
+ssize_t yieldFDThreads()
 {
-	/* save the current thread id */
 	size_t yieldingThread = threads.currentThreadIndex;
 
 	do
@@ -106,13 +141,46 @@ void ult_yield()
 		/* work through the list and find the next runable thread */
 		threads.currentThreadIndex = (threads.currentThreadIndex + 1) % threads.size;
 	}
-	while((threads.threads[threads.currentThreadIndex].status == STATUS_FINISHED)
-		|| (threads.threads[threads.currentThreadIndex].status == STATUS_FINISHED));
+	while(((threads.threads[threads.currentThreadIndex].status == STATUS_FINISHED)
+		|| (threads.threads[threads.currentThreadIndex].status == STATUS_JOINED)) 
+		&& (threads.threads[threads.currentThreadIndex].fd < 0 
+		|| !hasInput(threads.threads[threads.currentThreadIndex].fd)));
 
-	/* return if the next runable thread already runs */
 	if(yieldingThread == threads.currentThreadIndex) 
 	{
-		return;
+		return -1;
+	}
+	else
+	{
+		return 0;
+	}
+}
+
+void ult_yield()
+{
+	/* save the current thread id */
+	size_t yieldingThread = threads.currentThreadIndex;
+
+	ssize_t res = yieldFDThreads();
+
+	if(res < 0)
+	{
+		do
+		{
+			/* work through the list and find the next runable thread */
+			threads.currentThreadIndex = (threads.currentThreadIndex + 1) % threads.size;
+		}
+		while(((threads.threads[threads.currentThreadIndex].status == STATUS_FINISHED)
+			|| (threads.threads[threads.currentThreadIndex].status == STATUS_JOINED))
+			&& threads.threads[threads.currentThreadIndex].fd > -1);
+
+		/* return if the next runable thread already runs */
+		if(yieldingThread == threads.currentThreadIndex) 
+		{
+			usleep(100000);
+			ult_yield();
+			return;
+		}
 	}
 
 	/* else swap to that thread */
@@ -154,30 +222,6 @@ int ult_join(int tid, int* status)
 	return 0;
 }
 
-static int hasInput(int fd)
-{
-	/* set of fds */
-	fd_set rfds;
-    struct timeval tv;
-
-    /* put in the requested fd */
-    FD_ZERO(&rfds);
-    FD_SET(fd, &rfds);
-
-    /* timout: 0.0 seconds */
-    tv.tv_sec = 0;
-    tv.tv_usec = 0;
-
-    /* check if data is available for reading */
-    int retval = select(fd + 1, &rfds, NULL, NULL, &tv);
-
-    if (retval == -1) perror("select() failed");
-    else if (retval) return 1;
-    else return 0;
-	
-	return 1;
-}
-
 int ult_gettid()
 {
 	return threads.threads[threads.currentThreadIndex].id;
@@ -185,6 +229,7 @@ int ult_gettid()
 
 ssize_t ult_read(int fd, void* buf, size_t size)
 {
+	threads.threads[threads.currentThreadIndex].fd = fd;
 	/* check if data is available */
 	if(hasInput(fd))
 	{

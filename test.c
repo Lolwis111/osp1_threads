@@ -7,8 +7,8 @@
 
 #include "ult.h"
 
-unsigned long long int bytesTransfered;
-float timePassed;
+unsigned long long int bytesTransfered = 0;
+float timePassed = 0.0f;
 
 static void threadA()
 {
@@ -20,16 +20,14 @@ static void threadA()
 	clock_t startTime = clock();
 	while(1)
 	{
-		/* read one byte (if available) and write it out */
-		char buf;
+		/* read bytes (if available) and write them out */
+		char buf[256];
 		ult_read(infile, &buf, sizeof(buf));
 		write(outfile, &buf, sizeof(buf));
 
 		/* build some stats */
-		bytesTransfered++;
+		bytesTransfered += sizeof(buf);
 		timePassed = (float)(clock() - startTime) / CLOCKS_PER_SEC;
-
-		ult_yield();
 	}
 
 	ult_exit(0);
@@ -41,9 +39,9 @@ static void threadB()
 	{
 		char buffer[16];
 		memset(buffer, 0, sizeof(buffer));
-		ssize_t size;
+
 		/* read (non blocking) a command from the user */
-		if((size = ult_read(STDIN_FILENO, buffer, sizeof(buffer))) > 0)
+		if(ult_read(STDIN_FILENO, buffer, sizeof(buffer)) > 0)
 		{
 			/* print some stats */
 			if(0 == strncmp(buffer, "stats\n", 6))
@@ -69,7 +67,7 @@ static void threadB()
 				else 
 					printf("%f Byte/s\n", speed);
 			}
-			/* exit the threadtool */
+			/* exit the threads */
 			else if(0 == strncmp(buffer, "exit\n", 5))
 			{
 				exit(EXIT_SUCCESS);
@@ -79,8 +77,6 @@ static void threadB()
 				puts("Command not found!\n");
 			}
 		}
-
-		ult_yield();
 	}
 
 	ult_exit(0);
